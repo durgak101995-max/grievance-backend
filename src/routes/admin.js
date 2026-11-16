@@ -203,4 +203,64 @@ router.post('/users', async (req, res) => {
   }
 });
 
+
+/* ---------------- Dashboard: stats + all complaints ---------------- */
+
+const OPEN_STATUSES = ['SUBMITTED', 'SEEN', 'IN_PROGRESS'];
+
+// GET /admin/stats
+router.get('/stats', async (req, res) => {
+  const [byStatus, overdue, byType, types] = await Promise.all([
+    prisma.complaint.groupBy({ by: ['status'], _count: { _all: true } }),
+    prisma.complaint.count({ where: { status: { in: OPEN_STATUSES }, dueAt: { lt: new Date() } } }),
+    prisma.complaint.groupBy({ by: ['grievanceTypeId'], _count: { _all: true } }),
+    prisma.grievanceType.findMany({ select: { id: true, name: true } }),
+  ]);
+
+  const status = { SUBMITTED: 0, SEEN: 0, IN_PROGRESS: 0, RESOLVED: 0, CLOSED: 0 };
+  byStatus.forEach((s) => { status[s.status] = s._count._all; });
+  const total = Object.values(status).reduce((a, b) => a + b, 0);
+
+  const nameOf = Object.fromEntries(types.map((t) => [t.id, t.name]));
+  res.json({
+    total,
+    status,
+    overdue,
+    byType: byType.map((t) => ({ type: nameOf[t.grievanceTypeId] || 'Unknown', count: t._count._all })),
+  });
+});
+
+// GET /admin/complaints?status=&grievanceTypeId=&overdue=true&q=
+router.get('/complaints', async (req, res) => {
+  const { status, grievanceTypeId, q, overdue } = req.query;
+  const where = {};
+  if (status) where.status = status;
+  if (grievanceTypeId) where.grievanceTypeId = grievanceTypeId;
+  if (overdue === 'true') {
+    where.status = { in: OPEN_STATUSES };
+    where.dueAt = { lt: new Date() };
+  }
+  if (q && q.trim()) {
+    const t = q.trim();
+    where.OR = [
+      { ticketNo: { contains: t, mode: 'insensitive' } },
+      { title: { contains: t, mode: 'insensitive' } },
+      { complainant: { loginId: { contains: t, mode: 'insensitive' } } },
+      { complainant: { name: { contains: t, mode: 'insensitive' } } },
+    ];
+  }
+
+  const list = await prisma.complaint.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+    take: 100,
+    include: {
+      grievanceType: { select: { name: true } },
+      complainant: { select: { name: true, loginId: true, department: { select: { name: true } } } },
+      assignedTo: { select: { name: true } },
+    },
+  });
+  res.json(list);
+});
+
 module.exports = router;
