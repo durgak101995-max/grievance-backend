@@ -1,0 +1,178 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Enums ----------
+
+enum UserRole {
+  STUDENT
+  STAFF
+  ADMIN
+}
+
+enum RouteRole {
+  PRIMARY    // e.g. Warden
+  SECONDARY  // e.g. Deputy Warden
+  HOD        // resolved dynamically from the complainant's department
+}
+
+enum ComplaintStatus {
+  SUBMITTED
+  SEEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum NotificationChannel {
+  PUSH
+  EMAIL
+  SMS
+}
+
+// ---------- Core ----------
+
+model Department {
+  id     String @id @default(uuid())
+  name   String @unique // CSE, ECE, ...
+  hodId  String? @unique
+  hod    User?   @relation("DepartmentHod", fields: [hodId], references: [id])
+  users  User[]  @relation("UserDepartment")
+}
+
+model User {
+  id           String     @id @default(uuid())
+  loginId      String     @unique // roll number (student) or employee ID (staff)
+  name         String
+  email        String?    @unique
+  phone        String?
+  passwordHash String
+  role         UserRole
+  departmentId String?
+  department   Department? @relation("UserDepartment", fields: [departmentId], references: [id])
+  hodOf        Department?  @relation("DepartmentHod")
+  isActive     Boolean    @default(true)
+  createdAt    DateTime   @default(now())
+
+  deviceTokens   DeviceToken[]
+  raisedComplaints   Complaint[] @relation("Complainant")
+  assignedComplaints Complaint[] @relation("AssignedTo")
+  routingRules   RoutingRule[]
+  comments       ComplaintComment[]
+  notifications  Notification[]
+}
+
+model DeviceToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique // FCM token
+  platform  String?  // android / ios
+  createdAt DateTime @default(now())
+}
+
+// ---------- Grievance setup (admin managed) ----------
+
+model GrievanceType {
+  id           String   @id @default(uuid())
+  name         String   @unique // Hostel, Fees, Exam, Transport...
+  description  String?
+  needsHod     Boolean  @default(false)
+  escalateAfterHours Int @default(72)
+  isActive     Boolean  @default(true)
+
+  rules      RoutingRule[]
+  complaints Complaint[]
+}
+
+model RoutingRule {
+  id              String        @id @default(uuid())
+  grievanceTypeId String
+  grievanceType   GrievanceType @relation(fields: [grievanceTypeId], references: [id], onDelete: Cascade)
+  userId          String?       // null when routeRole = HOD (resolved from department)
+  user            User?         @relation(fields: [userId], references: [id])
+  routeRole       RouteRole
+  level           Int           @default(1) // 1 = first notified, 2 = escalation...
+
+  @@index([grievanceTypeId, level])
+}
+
+// ---------- Complaints ----------
+
+model Complaint {
+  id              String          @id @default(uuid())
+  ticketNo        String          @unique // e.g. GRV-2026-00012
+  grievanceTypeId String
+  grievanceType   GrievanceType   @relation(fields: [grievanceTypeId], references: [id])
+  complainantId   String
+  complainant     User            @relation("Complainant", fields: [complainantId], references: [id])
+  title           String
+  description     String
+  status          ComplaintStatus @default(SUBMITTED)
+  currentLevel    Int             @default(1)
+  assignedToId    String?         // person who clicked "Accept / Take"
+  assignedTo      User?           @relation("AssignedTo", fields: [assignedToId], references: [id])
+  dueAt           DateTime?       // when auto-escalation triggers
+  resolvedAt      DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  attachments   ComplaintAttachment[]
+  comments      ComplaintComment[]
+  history       StatusHistory[]
+  notifications Notification[]
+
+  @@index([status, dueAt])
+  @@index([complainantId])
+}
+
+model ComplaintAttachment {
+  id          String    @id @default(uuid())
+  complaintId String
+  complaint   Complaint @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+  fileUrl     String
+  fileName    String
+  createdAt   DateTime  @default(now())
+}
+
+model ComplaintComment {
+  id          String    @id @default(uuid())
+  complaintId String
+  complaint   Complaint @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+  authorId    String
+  author      User      @relation(fields: [authorId], references: [id])
+  message     String
+  createdAt   DateTime  @default(now())
+}
+
+model StatusHistory {
+  id          String          @id @default(uuid())
+  complaintId String
+  complaint   Complaint       @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+  status      ComplaintStatus
+  note        String?
+  changedById String?
+  createdAt   DateTime        @default(now())
+}
+
+// ---------- Notifications ----------
+
+model Notification {
+  id          String              @id @default(uuid())
+  userId      String
+  user        User                @relation(fields: [userId], references: [id])
+  complaintId String?
+  complaint   Complaint?          @relation(fields: [complaintId], references: [id])
+  channel     NotificationChannel
+  title       String
+  body        String
+  isRead      Boolean             @default(false)
+  sentAt      DateTime            @default(now())
+
+  @@index([userId, isRead])
+}
